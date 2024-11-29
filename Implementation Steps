@@ -5,11 +5,126 @@ Project Components:
 2.Databases : Postgress SQL
 3.In-memory Datastores: Redis
 
+CI Process steps:
+-----------------
+
+In your Azure Portal make sure you create a Resource group , Azure Container Registry and a Virtual Machine running with Linux.
+Here we are using a self-hosted agent to build and deploy our code. Create a self-hosted agent using the following steps and configure using your Gitbash or CLI.
+
+--> Goto Azure Devops portal >> Organisation settings >> Agent pools >> Add pool >> create a new agent pool 
+--> In Agent pool, click on Agent >> create new agent >> select Linux and run the following commands in your Gitbash or CLI
+
+# Login into your Azure agent or Virtual machine
+	ssh -i <your-azureagent-pem-file> <username>@<vm-public-ip-address>
+
+# Create directory myagent and set path
+# Configure your account to get the agent
+	mkdir myagent && cd myagent
+	wget https://vstsagentpackage.azureedge.net/agent/4.248.0/vsts-agent-linux-x64-4.248.0.tar.gz
+
+# To update the apt repositories in your vm
+	sudo apt update
+
+# Extract the tar file usding this command
+	tar zxvf vsts-agent-linux-x64-4.248.0.tar.gz
+
+# Configure the agent and Enter server url
+	./config.sh  and https://dev.azure.com/{your-organization} 
+
+# Create a Personal access token and paste it in the CLI
+Goto Azure Devops portal and create a personal access token(PAT) and copy paste it in your CLI
+
+# Enter azure agent pool name and agent name and all the settings will be saved automatically
+# We have install docker in the agent machine so run the below command 
+	sudo apt install docker.io
+# Add the docker the azureuser and restart the docker 
+	sudo usermod -aG docker azureuser
+	sudo systemctl restart docker
+# Logout and login into the Linux vm and restart docker , test by pulling the hello-world if docker daemon is working
+
+	logout 
+	ssh -i <your-azureagent-pem-file> <username>@<vm-public-ip-address>
+	sudo systemctl restart docker
+	docker pull hello-world
+	
+# Run the agent
+	./run.sh
+
+# Go to Azure Devops portal >> Pipelines >> Create Pipeline >> Select Repository >> Select Docker build and push and image option and the configure the yaml file as below
+
+# Docker
+# Build and push an image to Azure Container Registry
+# https://docs.microsoft.com/azure/devops/pipelines/languages/docker
+
+trigger:
+ paths:
+   include:
+     - vote/*
+
+resources:
+- repo: self
+
+variables:
+  # Container registry service connection established during pipeline creation
+  dockerRegistryServiceConnection: '622d0574-2f71-4cb3-aa57-8fa7c55adc42'
+  imageRepository: 'votingapp'
+  containerRegistry: 'mbazurecr.azurecr.io'
+  dockerfilePath: '$(Build.SourcesDirectory)/result/Dockerfile'
+  tag: '$(Build.BuildId)'
+
+pool:
+ name: 'azureagentpool'
+
+stages:
+- stage: Build
+  displayName: Build 
+  jobs:
+  - job: Build
+    displayName: Build
+    steps:
+    - task: Docker@2
+      displayName: Build an image to container registry
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)'
+        command: 'build'
+        Dockerfile: 'vote/Dockerfile'
+        tags: '$(tag)'
+- stage: Push
+  displayName: Push 
+  jobs:
+  - job: Push
+    displayName: Push
+    steps:
+    - task: Docker@2
+      displayName: Push an image to container registry
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)'
+        command: 'push'
+        tags: '$(tag)'
+	
+--> Make sure the agent is running and then run the pipeline and the container image is pushed into the container-registry
+--> Here the CI part is completed
+
 CD Process steps:
+-----------------
+
 1. Create Kubernetes cluster and login 
 
-Enter these commands in your Gitbash or CLI
---> az aks get-credentials --name azuredevops --overwrite-existing-group yourresourcegroup
+Goto Azure portal and select Kubernetes services for creating a K8s cluster
+--> Inside K8s cluster under Nodepools keep the scaling as Autoscale and set the minimum and maximun node count also check this option compulsory (Enable public IP per node)and create the K8s cluster
+
+Enter these commands in your Azure-CLI
+If it is a Windows system run the below commands to login  or ref https://learn.microsoft.com/en-us/cli/azure/authenticate-azure-cli-interactively
+	az account clear
+	az config set core.enable_broker_on_windows=false
+	az login (or) simply use 'az login' command in your CLI 
+
+Once you have logged in run the below commands to connectto your K8s cluster
+--> az aks get-credentials --name <yourk8sclustername> --overwrite-existing-group <yourresourcegroup>
+		(or)
+	az aks get-credentials --resource-group <yourresourcegroup> --name <yourk8sclustername>
 --> kubectl get pods (there should not be any pods available)
 
 2. Install ArgoCD into the Kubernetes cluster
@@ -37,7 +152,9 @@ Check if all the ArgoCD resources are installed , run below command
 
 	kubectl edit svc argocd-server -n argocd , here edit the type from ClusterIP to Nodeport
 
---> Copy the Nodeport IP in http from this command : kubectl get svc -n argocd  
+--> Copy the Nodeport IP in http format from this command : kubectl get svc -n argocd  
+--> Get the external-ip-address of the kubernetes node using below command
+	kubectl get nodes -o wide
 --> Goto Virtual machines scale sets , click on nodepools >> instances >> networking >> inbound port rules >> add inbound security rule (Keeping all things as default) 
 --> Goto your browser and type nodeip:nodeport to access the ArgoCD website and sign-in to the console
 
@@ -60,14 +177,36 @@ Generally if you make any change in the code it should trigger the pipeline and 
 
 --> Create a folder in your repository in AzureDevops as 'scripts' and create file with name 'updateK8sManifests.sh'
 
-Copy and paste the Shellscript written to update the repository with a new image everytime the update script is executed through CICD pipeline   
-Update the Repo url with the PAT(personal access token) 
+--> Copy and paste the Shellscript written to update the repository with a new image everytime the update script is executed through CICD pipeline   
+--> Update the Repo url with the PAT(personal access token) 
 **In your organisation's perspective storing the access token in the Git repository is not safe so we should pass another CLI argument from the CI Pipeline and CI can read it from the environment variables** 
 
-Goto your vote pipeline and edit the yaml file to create a new stage as Update to add the shellscript
-In the Update stage settings add a shellscript task and on the right side add your script path and Arguments (<microservice> $imageRepository $tag)
-The shellscript will update the deployment yaml file of that microservice in the repository with a new image whenever a new image is created
-In your shellscript you have the below components:
+--> Goto your vote pipeline and edit the yaml file to create a new stage as Update to add the shellscript as below
+	- stage: Update
+  displayName: Update
+  jobs:
+  - job: Update
+    displayName: Update
+    steps:
+    - script: |
+        sudo yum update
+        sudo yum install dos2unix -y
+        dos2unix scripts/updateK8sManifests.sh
+      displayName: 'Install pkgs'
+    - task: ShellScript@2
+      inputs:
+        scriptPath: 'scripts/updateK8sManifests.sh'
+        args: 'vote $(imageRepository) $(tag)'
+		
+--> In the Update stage settings add a shellscript task and on the right side add your script path and Arguments <microservice> $(imageRepository) $(tag)
+--> The shellscript will update the deployment yaml file of that microservice in the repository with a new image whenever a new image is created
+
+--> For Windows systems use the below commands in your CLI before adding the shellscript in the AzureRepo
+	sudo apt-get update
+	sudo apt-get install dos2unix
+	dos2unix <script.sh> // script file name
+
+--> In your shellscript you have the below code:
 
 # Run the script in a debug mode
 set -x
@@ -111,21 +250,25 @@ kubectl edit cm argocd-cm -n argocd
 data:
  timeout.reconciliation: 10s
  
-Refresh the ArgoCD console you will see the kubernetes pod is not running its because K8s is trying to pull the image from a private Azure Container Registry 
-Here we use the concept of ImagePullSecrets. Run these commands in your CLI for creating a ACR ImagePullSecret.
+--> Refresh the ArgoCD console you will see the kubernetes pod is not running its because K8s is trying to pull the image from a private Azure Container Registry 
+--> You don't have the access of pulling an image from the private container-registry present in AzureRepo
+--> Here we use the concept of ImagePullSecrets. Run these commands in your CLI for creating a ACR ImagePullSecret.
 
 kubectl create secret docker-registry <secret-name> \
     --namespace <namespace> \
     --docker-server=<container-registry-name>.azurecr.io \
-    --docker-username=<service-principal-ID> \
+    --docker-username=<service-principal-ID> \ (Enable the admin user access for the Container registry and use the admin credentials)
     --docker-password=<service-principal-password>
+	
 
-Goto your deployment yaml file and edit , add ImagePullSecret as below
+--> Goto your deployment yaml file in k8s-specifications folder and edit , add ImagePullSecret(inline with the containers) as below 
 
-imagePullSecret:
+imagePullSecrets:
  -name: <secret-name>
 
-To verify the CICD Pipeline go to <microservice>/app.py and do some change in the code and then the pipeline will trigger automatically and deploy the app in the K8s cluster
+ 
+
+--> To verify the CICD Pipeline go to <microservice>/app.py and do some change in the code and then the pipeline will trigger automatically and deploy the app in the K8s cluster
 
 #Check if the latest image is deployed on the K8s cluster
 kubectl get deploy vote -o yaml 
